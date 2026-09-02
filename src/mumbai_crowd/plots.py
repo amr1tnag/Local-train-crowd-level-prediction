@@ -396,21 +396,30 @@ def fig_quantile_calibration(y_true, qpred: np.ndarray, taus, outdir: Path | Non
     return _save(fig, "12_quantile_calibration.png", outdir)
 
 
-def fig_danger_reliability(table: pd.DataFrame, outdir: Path | None = None) -> Path:
-    """Plot a reliability table from :func:`metrics.danger_reliability_table`.
+def fig_danger_reliability(tables: dict[str, pd.DataFrame], outdir: Path | None = None) -> Path:
+    """Reliability of one or more `P(DANGEROUS | x)` models, plus their support.
 
-    The Bayes decision rule is only optimal if the probabilities it consumes
-    are *conditionally* calibrated -- marginal coverage is not enough.  Points
-    below the diagonal mean the model is over-confident about danger; points
-    above mean it is under-stating it, and under-stating a 1.5% event is
-    exactly how a theoretically optimal policy ends up refusing to act.
+    Built from :func:`metrics.danger_reliability_table`.  The Bayes decision
+    rule is optimal only when the probabilities it consumes are *conditionally*
+    calibrated -- marginal coverage is not enough -- so this is the figure that
+    decides whether the optimal rule can be used at all.  Points above the
+    diagonal mean the model under-states danger (and the Bayes rule will refuse
+    to act); points below mean it over-states it (and the rule will over-alarm).
     """
     use_house_style()
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.8))
-    lim = max(float(table[["predicted", "observed"]].to_numpy().max()) * 1.15, 0.05)
+    if isinstance(tables, pd.DataFrame):          # single-model convenience
+        tables = {"model": tables}
+
+    colours = [ACCENT, "#3d7ea6", "#7a5195", "#68a357"]
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.0), gridspec_kw={"wspace": 0.32})
+
+    lim = max(
+        float(t[["predicted", "observed"]].to_numpy().max()) for t in tables.values()
+    ) * 1.12
+    lim = max(lim, 0.05)
     axes[0].plot([0, lim], [0, lim], ls="--", color=NEUTRAL, lw=1.0, label="perfect calibration")
-    axes[0].plot(table["predicted"], table["observed"], marker="o", color=ACCENT, lw=1.6,
-                 label="quantile ensemble")
+    for (name, t), c in zip(tables.items(), colours):
+        axes[0].plot(t["predicted"], t["observed"], marker="o", ms=5, color=c, lw=1.7, label=name)
     axes[0].set_xlabel("predicted P(DANGEROUS)")
     axes[0].set_ylabel("observed frequency")
     axes[0].set_xlim(0, lim)
@@ -418,15 +427,62 @@ def fig_danger_reliability(table: pd.DataFrame, outdir: Path | None = None) -> P
     axes[0].set_title("Reliability of the danger probability")
     axes[0].legend(fontsize=8)
 
-    axes[1].bar(range(len(table)), table["n"], color=NEUTRAL)
+    # Support is plotted against each model's *own* bin probability rather than
+    # against a shared category index: two models put their bins in different
+    # places, and a grouped bar chart would silently line up a 0.6 bin from one
+    # model with a 0.4 bin from the other.
+    for (name, t), c in zip(tables.items(), colours):
+        axes[1].plot(t["predicted"], t["n"], marker="o", ms=5, color=c, lw=1.7, label=name)
     axes[1].set_yscale("log")
-    axes[1].set_xticks(range(len(table)))
-    axes[1].set_xticklabels([f"{v:.3f}" for v in table["predicted"]], rotation=45, fontsize=7)
-    axes[1].set_xlabel("bin (mean predicted probability)")
-    axes[1].set_ylabel("coach-arrivals (log)")
-    axes[1].set_title("How much data sits in each bin")
-    fig.suptitle("A Bayes rule is only as good as the probabilities it is fed", y=1.02, fontsize=11)
+    axes[1].set_xlim(0, lim)
+    axes[1].set_xlabel("predicted P(DANGEROUS)")
+    axes[1].set_ylabel("coach-arrivals in the bin (log)")
+    axes[1].set_title("Resolution: how many rows reach a high probability at all")
+    if len(tables) > 1:
+        axes[1].legend(fontsize=8)
+    fig.suptitle("A Bayes rule is only as good as the probabilities it is fed",
+                 y=1.02, fontsize=11)
     return _save(fig, "13_danger_reliability.png", outdir)
+
+
+def fig_calibration_grid(table: pd.DataFrame, outdir: Path | None = None) -> Path:
+    """Expected cost for every (class weighting x calibrator) combination.
+
+    Two levers that are usually applied together, separated so their
+    interaction is visible: recalibration rescues a model whose probabilities
+    were broken by reweighting, and damages one whose probabilities were fine.
+    """
+    use_house_style()
+    piv = table.pivot(index="class_weight", columns="calibrator", values="exp_cost_inr")
+    order = [c for c in ("identity", "temperature", "isotonic") if c in piv.columns]
+    piv = piv[order]
+    # Sound model first, then the deliberately broken one, so the figure reads
+    # left to right as "what happens when you break calibration on purpose".
+    rows = [r for r in ("none", "balanced") if r in piv.index]
+    piv = piv.loc[rows + [r for r in piv.index if r not in rows]]
+
+    fig, ax = plt.subplots(figsize=(6.6, 3.8))
+    x = np.arange(len(piv.index))
+    width = 0.8 / len(order)
+    # A sequential ramp for "increasingly flexible calibrator".  Deliberately
+    # not the band palette, which means crowd level everywhere else in the
+    # report and would read as a crowd claim here.
+    palette = ["#cfd6db", "#8d9ba5", "#3f4a52"]
+    for i, col in enumerate(order):
+        vals = piv[col].to_numpy()
+        ax.bar(x + i * width, vals, width=width, color=palette[i % len(palette)], label=col)
+        for xi, v in zip(x + i * width, vals):
+            ax.text(xi, v, f"{v:.0f}", ha="center", va="bottom", fontsize=7.5)
+    best = float(np.nanmin(piv.to_numpy()))
+    ax.axhline(best, color=ACCENT, ls="--", lw=1.2, label=f"best = ₹{best:.1f}")
+    ax.set_xticks(x + width * (len(order) - 1) / 2)
+    ax.set_xticklabels(piv.index, fontsize=9)
+    ax.set_xlabel("training class weighting")
+    ax.margins(y=0.12)
+    ax.set_ylabel("expected cost per arrival (₹)")
+    ax.set_title("Recalibration helps a broken model and hurts a sound one")
+    ax.legend(fontsize=8)
+    return _save(fig, "14_calibration_grid.png", outdir)
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,14 @@ import numpy as np
 import pandas as pd
 
 from mumbai_crowd import plots
+from mumbai_crowd.classification import (
+    BandClassifier,
+    CalibratedBandClassifier,
+    IdentityCalibrator,
+    IsotonicCalibrator,
+    TemperatureCalibrator,
+    split_validation_by_date,
+)
 from mumbai_crowd.config import (
     COST_OVER,
     COST_UNDER,
@@ -39,6 +47,7 @@ from mumbai_crowd.config import (
 from mumbai_crowd.decision import (
     DistributionalPolicy,
     NaivePolicy,
+    ProbabilityPolicy,
     ThresholdPolicy,
     action_confusion,
     policy_report,
@@ -123,6 +132,7 @@ def main() -> int:
     ap.add_argument("--test-days", type=int, default=ModelConfig.test_days,
                     help="final days held out for reporting")
     ap.add_argument("--skip-quantile", action="store_true")
+    ap.add_argument("--skip-classifier", action="store_true")
     ap.add_argument("--skip-sensitivity", action="store_true")
     args = ap.parse_args()
 
@@ -225,11 +235,8 @@ def main() -> int:
               f"of {len(p_danger):,}  ({(p_danger > 0.25).mean():.3%})")
         print("  (the Bayes rule needs roughly P>0.25 before a relief rake beats marshalling,")
         print("   so if the tail probability is under-stated the optimal policy simply never fires)")
-        reliability = danger_reliability_table(p_danger, y_test)
         print()
-        print(reliability.round(4).to_string(index=False))
-        reliability.to_csv(tabdir / "co2_danger_reliability.csv", index=False)
-        plots.fig_danger_reliability(reliability, figdir)
+        print(danger_reliability_table(p_danger, y_test).round(4).to_string(index=False))
 
         coverage = pd.DataFrame(
             {
@@ -242,6 +249,83 @@ def main() -> int:
         print(coverage.round(4).to_string(index=False))
         coverage.to_csv(tabdir / "co2_quantile_calibration.csv", index=False)
         plots.fig_quantile_calibration(y_test, q_test, TAUS, figdir)
+
+    # ------------------------------------------------- band classifier ------
+    reliability_tables = {}
+    if qe is not None:
+        reliability_tables["quantile ensemble"] = danger_reliability_table(
+            DistributionalPolicy(taus=np.asarray(TAUS)).band_probabilities(q_test)[:, 3], y_test
+        )
+
+    calib_rows = []
+    if not args.skip_classifier:
+        banner("CO2 | Modelling the bands directly: classifier x recalibration")
+        print("  The quantile route infers a 1% tail from a distribution fitted to the whole")
+        print("  range.  A multiclass model targets the bands themselves.  Two levers are")
+        print("  crossed here because they interact: class weighting (which buys the tail")
+        print("  capacity at the cost of calibration) and post-hoc recalibration (which is")
+        print("  supposed to give the calibration back).")
+
+        val_es, val_cal = split_validation_by_date(split.val)
+        print(f"\n  validation split by date so calibration never sees the early-stopping rows:")
+        print(f"    early stopping : {val_es['date'].min().date()} .. {val_es['date'].max().date()}  n={len(val_es):,}")
+        print(f"    calibration    : {val_cal['date'].min().date()} .. {val_cal['date'].max().date()}  n={len(val_cal):,}")
+
+        Xtr = prepare_matrix(split.train, cols)
+        Xes, y_es = prepare_matrix(val_es, cols), val_es[TARGET].to_numpy(float)
+        Xcal, y_cal = prepare_matrix(val_cal, cols), val_cal[TARGET].to_numpy(float)
+        Xte = prepare_matrix(split.test, cols)
+        ytr = split.train[TARGET].to_numpy(float)
+
+        base_rates = {
+            "train": float((split.train[TARGET] >= 12.0).mean()),
+            "val (calibration half)": float((val_cal[TARGET] >= 12.0).mean()),
+            "test": float((split.test[TARGET] >= 12.0).mean()),
+        }
+        print("\n  DANGEROUS base rate by period (this is the thing that shifts):")
+        for k, v in base_rates.items():
+            print(f"    {k:24s} {v:.4f}")
+
+        prob_policy = ProbabilityPolicy()
+        best_clf = None
+        for weight in (None, "balanced"):
+            for cal in (IdentityCalibrator(), TemperatureCalibrator(), IsotonicCalibrator()):
+                model = CalibratedBandClassifier(
+                    BandClassifier(cfg=mcfg, class_weight=weight), calibrator=cal
+                )
+                model.fit(Xtr, ytr, Xes, y_es, Xcal, y_cal)
+                probs = model.predict_proba(Xte)
+                rep = policy_report(y_test, prob_policy.decide(probs))
+                kind = type(cal).__name__.replace("Calibrator", "").lower()
+                rep.update({
+                    "class_weight": "balanced" if weight else "none",
+                    "calibrator": kind,
+                    "mean_p_danger": float(probs[:, 3].mean()),
+                    "temperature": float(getattr(cal, "temperature_", np.nan)),
+                })
+                calib_rows.append(rep)
+                policy_rows[f"classifier[{rep['class_weight']}] + {kind} + Bayes action"] = {
+                    k: v for k, v in rep.items()
+                    if k not in ("class_weight", "calibrator", "mean_p_danger", "temperature")
+                }
+                print(f"  {rep['class_weight']:>8s} weighting / {kind:<11s} "
+                      f"cost={rep['exp_cost_inr']:7.2f}  miss={rep['dangerous_miss']:.4f}  "
+                      f"recall={rep['danger_recall']:.4f}  FA={rep['false_alarm']:.4f}  "
+                      f"meanP(DANG)={rep['mean_p_danger']:.4f}")
+                if best_clf is None or rep["exp_cost_inr"] < best_clf[0]:
+                    best_clf = (rep["exp_cost_inr"], model, probs)
+
+        calib_df = pd.DataFrame(calib_rows)
+        calib_df.to_csv(tabdir / "co2_calibration_grid.csv", index=False)
+        plots.fig_calibration_grid(calib_df, figdir)
+
+        reliability_tables["band classifier"] = danger_reliability_table(best_clf[2][:, 3], y_test)
+        print(f"\n  cheapest classifier variant: ₹{best_clf[0]:.2f}  ({best_clf[1].name})")
+
+    if reliability_tables:
+        print(f"\n  {plots.fig_danger_reliability(reliability_tables, figdir)}")
+        for name, tab in reliability_tables.items():
+            tab.to_csv(tabdir / f"co2_reliability_{name.replace(' ', '_')}.csv", index=False)
 
     policy_table = pd.DataFrame(policy_rows).T.sort_values("exp_cost_inr")
     banner("CO2 | Policy comparison on the test period")
@@ -338,6 +422,17 @@ def main() -> int:
         "tuned_flat_margin": float(margin.margin_),
         "thresholds_pinball": [float(x) for x in thresholds["lgbm_pinball"].thresholds_],
     }
+    if calib_rows:
+        best = min(calib_rows, key=lambda r: r["exp_cost_inr"])
+        summary["classifier"] = {
+            "best_variant": f"{best['class_weight']} weighting / {best['calibrator']} calibration",
+            "cost_inr": float(best["exp_cost_inr"]),
+            "dangerous_miss": float(best["dangerous_miss"]),
+            "danger_recall": float(best["danger_recall"]),
+            "grid_cost_inr": {
+                f"{r['class_weight']}/{r['calibrator']}": float(r["exp_cost_inr"]) for r in calib_rows
+            },
+        }
     (tabdir / "co2_summary.json").write_text(json.dumps(summary, indent=2))
     band_confusion(y_test, preds_test["lgbm_pinball"], normalize="true").to_csv(
         tabdir / "co2_confusion_pinball.csv"

@@ -18,12 +18,18 @@ is therefore
 
     a^*(x) = \\arg\\min_a \\sum_b P(\\text{band}=b \\mid x)\\, C[b, a]
 
-which is what :class:`DistributionalPolicy` computes.  :class:`ThresholdPolicy`
-is the cheap, deployable approximation: keep the point forecast, but move the
-alert cut-points down to wherever validation says expected cost is minimised.
+which is what :func:`bayes_action` computes.  Two policies feed it:
+:class:`DistributionalPolicy` infers the probabilities from a quantile
+ensemble, and :class:`ProbabilityPolicy` takes them from a model that predicts
+the bands directly (see :mod:`mumbai_crowd.classification`).
+:class:`ThresholdPolicy` is the cheap, deployable approximation that skips
+probabilities altogether: keep the point forecast, but move the alert
+cut-points down to wherever validation says expected cost is minimised.
 
-Both are strictly better than comparing a point forecast to the physical band
-edges, and both are honest about what they cost in false alarms.
+All three beat comparing a point forecast to the physical band edges, and all
+three are honest about what they cost in false alarms.  Which of them wins is
+not obvious in advance -- the Bayes rule is optimal only for the model whose
+probabilities are actually calibrated where the decision turns.
 """
 
 from __future__ import annotations
@@ -157,6 +163,46 @@ class ThresholdPolicy(Policy):
         return "\n".join(rows)
 
 
+def bayes_action(probs: np.ndarray, cost_matrix: np.ndarray = COST_MATRIX) -> np.ndarray:
+    """The cost-minimising action for each row, given band probabilities.
+
+    ``argmin_a sum_b P(band=b | x) C[b, a]``.  One line, and it is the whole of
+    cost-sensitive decision theory: once you have calibrated probabilities the
+    cost matrix decides the action with nothing left to tune.  Everything hard
+    about this problem is therefore pushed into *getting the probabilities
+    right*, which is the point :mod:`mumbai_crowd.classification` exists to
+    make.
+    """
+    probs = np.asarray(probs, dtype=float)
+    if probs.ndim != 2 or probs.shape[1] != cost_matrix.shape[0]:
+        raise ValueError(
+            f"expected an (n, {cost_matrix.shape[0]}) probability matrix, got {probs.shape}"
+        )
+    return np.argmin(probs @ cost_matrix, axis=1)
+
+
+@dataclass
+class ProbabilityPolicy(Policy):
+    """Bayes action taken straight from a model that outputs band probabilities.
+
+    The counterpart to :class:`DistributionalPolicy`: same decision rule, but
+    the probabilities come from a classifier trained on the bands rather than
+    being inferred from a quantile function.  Having both lets the report
+    separate two questions that are easy to conflate -- whether the Bayes rule
+    is the right rule, and whether a given model's probabilities are good
+    enough to use it.
+    """
+
+    cost_matrix: np.ndarray = field(default_factory=lambda: COST_MATRIX)
+    name: str = "bayes_from_probabilities"
+
+    def decide(self, probs) -> np.ndarray:
+        return bayes_action(probs, self.cost_matrix)
+
+    def expected_costs(self, probs) -> np.ndarray:
+        return np.asarray(probs, dtype=float) @ self.cost_matrix
+
+
 @dataclass
 class DistributionalPolicy(Policy):
     """Bayes-optimal action from a predicted distribution.
@@ -196,9 +242,7 @@ class DistributionalPolicy(Policy):
         return probs / probs.sum(axis=1, keepdims=True)
 
     def decide(self, quantile_pred) -> np.ndarray:
-        probs = self.band_probabilities(quantile_pred)
-        expected = probs @ self.cost_matrix        # (n, 4): cost of each action
-        return np.argmin(expected, axis=1)
+        return bayes_action(self.band_probabilities(quantile_pred), self.cost_matrix)
 
     def expected_costs(self, quantile_pred) -> np.ndarray:
         return self.band_probabilities(quantile_pred) @ self.cost_matrix
@@ -297,7 +341,9 @@ __all__ = [
     "DistributionalPolicy",
     "NaivePolicy",
     "Policy",
+    "ProbabilityPolicy",
     "ThresholdPolicy",
     "action_confusion",
+    "bayes_action",
     "policy_report",
 ]

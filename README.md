@@ -9,7 +9,7 @@ end against one problem:
 
 | | Outcome | What is built |
 |---|---|---|
-| **CO2** | Supervised regression | Coach-level crowd density predicted from time, calendar, weather and operating features, trained under **asymmetric loss** and turned into an operational alert by an explicit **cost-optimal decision layer**. |
+| **CO2** | Supervised regression | Coach-level crowd density predicted from time, calendar, weather and operating features, trained under **asymmetric loss** and turned into an operational alert by an explicit **cost-optimal decision layer** — point-forecast thresholds, a quantile ensemble, and a direct band classifier, all scored against one cost matrix. |
 | **CO5** | Unsupervised clustering | The 35 Harbour-line stations grouped by their 24-hour boarding/alighting signatures into interpretable operational **roles**, then fed back into CO2 to test whether the structure is useful as well as pretty. |
 
 ---
@@ -68,7 +68,7 @@ With this project's cost ratio of 6:1 that is $\tau = 0.857$. **The
 "safety margin" is not a number I chose. It is a number the cost ratio
 implies**, and `PinballLoss.from_costs()` computes it. Changing the operator's
 view of the cost ratio changes the model, monotonically and predictably — see
-the sensitivity analysis in §6.5.
+the sensitivity analysis in §6.6.
 
 ---
 
@@ -88,7 +88,7 @@ Or step by step:
 python scripts/01_generate_data.py --days 180 --monitored 0.08   # simulate
 python scripts/02_train_regression.py                            # CO2
 python scripts/03_cluster_stations.py --k 5                      # CO5
-python -m pytest                                                 # 100+ tests
+python -m pytest                                                 # 155 tests, ~3 min
 ```
 
 Figures land in `reports/figures/`, tables in `reports/tables/`.
@@ -317,7 +317,7 @@ whole distribution sits on one side. A coach forecast at 9.5 with a wide right
 tail is *point*-CRUSH but may carry a 30% probability of super-dense crush —
 and 30% of a ₹22,000 outcome dominates the ₹500 cost of over-reacting.
 
-Three policies are implemented and compared (`src/mumbai_crowd/decision.py`):
+Four policies are implemented and compared (`src/mumbai_crowd/decision.py`):
 
 1. **`NaivePolicy`** — compare the point forecast to the band edges. The thing
    everyone writes first, kept as the comparison point.
@@ -325,8 +325,12 @@ Three policies are implemented and compared (`src/mumbai_crowd/decision.py`):
    on validation against the cost matrix. The objective is a step function of
    the thresholds, so gradients are useless and a direct grid sweep is both
    simpler and exact. Deployable: it is three numbers a control room can act on.
-3. **`DistributionalPolicy`** — a quantile ensemble gives `p(y|x)`, which is
-   converted to band probabilities and then to the Bayes action
+3. **`ProbabilityPolicy`** — the Bayes action taken straight from a model that
+   outputs band probabilities (`src/mumbai_crowd/classification.py`). No
+   thresholds to tune at all: once the probabilities exist the cost matrix
+   decides.
+4. **`DistributionalPolicy`** — a quantile ensemble gives `p(y|x)`, which is
+   converted to band probabilities and then to the same Bayes action
    `argmin_a Σ_b P(band=b|x) C[b,a]`. Textbook-correct, and needs no threshold
    tuning at all.
 
@@ -415,20 +419,23 @@ Policy comparison on test:
 |---|---|---|---|---|---|
 | `lgbm_l2` + naive edges | 143.0 | 43.8% | 6.3% | 1.4% | 0.2% |
 | `lgbm_asym_l2` + naive edges | 97.1 | 23.1% | 22.7% | 3.3% | 0.8% |
-| `lgbm_pinball` + naive edges | **84.9** | 17.3% | 42.2% | 4.9% | 1.8% |
+| `lgbm_pinball` + naive edges | 84.9 | 17.3% | 42.2% | 4.9% | 1.8% |
 | `lgbm_asym_l2` + cost-optimal thresholds | 86.1 | 8.8% | 60.9% | 10.7% | 3.4% |
 | `lgbm_pinball` + cost-optimal thresholds | 87.5 | **8.1%** | 59.4% | 11.7% | 3.3% |
 | quantile ensemble + Bayes action | 116.0 | 10.9% | 30.0% | 7.4% | 1.1% |
+| *(band classifier + Bayes action — see §6.5)* | ***80.97*** | *9.1%* | *31.1%* | *8.6%* | *1.5%* |
 
 Two things worth reading carefully:
 
 - The cheapest policies and the *safest* policies are **not the same
-  policies**, and they differ by about ₹3 per arrival. `pinball + thresholds`
-  more than halves said-safe-when-dangerous (17.3% → 8.1%) for a 3% cost
-  increase the cost matrix says is not worth paying. Whether it *is* worth
+  policies**, and they differ by a few rupees per arrival. `pinball +
+  thresholds` more than halves said-safe-when-dangerous (17.3% → 8.1%) for a
+  cost increase the matrix says is not worth paying. Whether it *is* worth
   paying is a question about how much the matrix under-prices a death, which
   is a policy question and is flagged as one rather than resolved here.
-- **The theoretically optimal policy came last but one.** See below.
+- **The theoretically optimal policy came last but one.** That is §6.4, and
+  the fix it points to is §6.5 — which ends up beating everything in this
+  table.
 
 ### 6.4 Why the Bayes-optimal policy lost
 
@@ -472,13 +479,96 @@ point forecast beats it.
 
 **This is a real limitation of the approach at this event rate, not a bug**,
 and the fix is not more quantiles: a nine-point grid already spends four of
-its points above τ = 0.9. The fix is a model that targets `P(DANGEROUS | x)`
-directly — a calibrated classifier with the cost matrix applied on top —
+its points above τ = 0.9. The fix is a model that targets the bands directly,
 rather than one that infers a 1% tail from a quantile function fitted to the
-whole distribution. `reports/figures/13_danger_reliability.png` is the
-evidence.
+whole distribution. That model is §6.5, and it turns out to win.
 
-### 6.5 The cost ratio is a dial, and it behaves
+### 6.5 Closing the loop: modelling the bands directly
+
+A LightGBM multiclass model over the four bands, with the same features and
+the same Bayes rule, produces **the cheapest policy in the project**:
+
+| policy | cost ₹ ↓ | said-safe-when-dangerous | danger recall | false alarm |
+|---|---|---|---|---|
+| **classifier + Bayes action** | **80.97** | 9.1% | 31.1% | 8.6% |
+| `lgbm_l2_margin` + naive edges | 84.18 | 13.3% | 40.5% | 6.3% |
+| `lgbm_pinball` + naive edges | 84.88 | 17.3% | 42.2% | 4.9% |
+| `lgbm_pinball` + cost-optimal thresholds | 87.51 | 8.1% | 59.4% | 11.7% |
+| quantile ensemble + Bayes action | 115.98 | 10.9% | 30.0% | 7.4% |
+| `lgbm_l2` + naive edges (baseline) | 143.00 | 43.8% | 6.3% | 1.4% |
+
+**₹143.0 → ₹81.0, a 43.4% reduction**, and the diagnosis in §6.4 is
+vindicated: the Bayes rule was never the problem. The same rule, fed
+probabilities from a model that targets the bands, goes from worst-but-one to
+first.
+
+#### It is resolution, not calibration
+
+The tempting summary — "the classifier is better calibrated" — is wrong, and
+the reliability diagram says so. At the top of the range the classifier is
+*worse* calibrated than the quantile ensemble: it sits **below** the diagonal
+(over-confident) where the ensemble sits above it. What the classifier has is
+**resolution** — it separates the population instead of huddling it near the
+base rate:
+
+| | rows in bins with mean P ≥ 0.25 | highest bin probability |
+|---|---|---|
+| quantile ensemble | 492 | 0.381 |
+| band classifier | 803 | 0.785 |
+
+The Bayes rule needs both properties, and the quantile route was short of the
+second one. A model can be beautifully calibrated and useless if it never says
+anything is likely.
+
+#### Recalibration helps a broken model and hurts a sound one
+
+Two levers are usually applied together — up-weight the rare class, then
+recalibrate — so the pipeline crosses them and reports all six cells:
+
+| training weighting | no recalibration | temperature (1 parameter) | isotonic (non-parametric) |
+|---|---|---|---|
+| **none** | **₹80.97** | ₹84.03 | ₹90.62 |
+| balanced | ₹212.32 | ₹133.78 | ₹86.43 |
+
+Read along each row. For the **balanced** model — whose probabilities are
+broken by construction, since it was fitted to a re-weighted distribution —
+recalibration helps enormously and the more flexible the calibrator the better
+(212 → 134 → 86). For the **unweighted** model, trained on plain multiclass
+log-loss, recalibration *hurts*, monotonically in flexibility (81 → 84 → 91).
+
+The reason is measurable rather than mysterious, and it is a property of this
+dataset that a real deployment would share:
+
+| period | P(DANGEROUS) |
+|---|---|
+| train (Jun–Oct, mostly monsoon) | 1.61% |
+| validation half used for calibration (late Oct) | 1.52% |
+| **test (Nov, post-monsoon)** | **1.13%** |
+
+On the calibration window the raw model *under*-states danger, so isotonic
+learns to push probabilities up — mapping a raw 0.10 to 0.22 and a raw 0.40 to
+0.55. On the test window, with 26% less danger about, that correction is
+exactly backwards, and the calibrated model ends up predicting 0.61 where the
+truth is 0.24. The calibrator faithfully transferred a base rate that had
+expired. Temperature scaling, with one degree of freedom, has less to transfer
+wrongly and lands in between — which is the point of running both.
+
+**The practical conclusion is not "calibrate your classifier".** It is: train
+on a proper scoring rule, do not break the probability scale with class
+weights, and then you have nothing to repair. Post-hoc calibration is a
+*repair*, and repairs fitted on one regime do not survive a change of regime.
+
+#### The row an operator might actually want
+
+`classifier[balanced] + no recalibration` costs ₹212 — nearly three times the
+best policy — and misses **0.16%** of dangerous coaches, against 9.1% for the
+cheapest. It is the wrong answer under this cost matrix, and it would be the
+right answer under a matrix that priced a death an order of magnitude higher.
+It is left in the table for exactly that reason: the ranking is a consequence
+of the cost assumptions in §4, and the reader should be able to see which
+model the other assumption would have selected.
+
+### 6.6 The cost ratio is a dial, and it behaves
 
 Retraining pinball at τ = r/(r+1) for a range of assumed cost ratios r:
 
@@ -498,7 +588,7 @@ deliverable an operator would actually want: not "here is the model" but
 "tell us what a missed crush event costs relative to an unnecessary relief
 rake, and this is the system you get."
 
-### 6.6 What real-time telemetry is worth
+### 6.7 What real-time telemetry is worth
 
 | feature set | features | RMSE | R² | cost ₹ | said-safe-when-dangerous | danger recall |
 |---|---|---|---|---|---|---|
@@ -712,7 +802,8 @@ All regenerated by `python scripts/run_all.py` into `reports/figures/`.
 | `10_cost_sensitivity.png` | the cost ratio as a policy dial, behaving monotonically |
 | `11_feature_importance.png` | what the schedule-only model actually uses |
 | `12_quantile_calibration.png` | nominal vs empirical coverage of the quantile ensemble |
-| `13_danger_reliability.png` | why the Bayes-optimal policy lost — the tail probability diagram |
+| `13_danger_reliability.png` | reliability *and resolution* of two competing probability models |
+| `14_calibration_grid.png` | class weighting × recalibration, and how they interact |
 | `20_k_selection.png` | six criteria for k, including the bootstrap-stability panel |
 | `21_dendrogram.png` | Ward linkage over station profiles, with the k = 4 cut |
 | `22_cluster_pca.png` | the four roles in PCA space, stations labelled |
@@ -740,6 +831,8 @@ src/mumbai_crowd/
   losses.py        ** The asymmetric losses. The core of the project. **
   metrics.py       Statistical and decision metrics, always reported together.
   decision.py      Naive / threshold / Bayes policies over model output.
+  classification.py  CO2 decision layer: a multiclass band model plus
+                   identity / temperature / isotonic recalibration.
   regression.py    CO2: baselines, linear-on-asymmetric-loss, LightGBM with a
                    pluggable objective, quantile ensemble.
   clustering.py    CO5: profiles, k selection, fitting, naming, validation.
@@ -751,9 +844,10 @@ scripts/
   03_cluster_stations.py  CO5 end to end + the CO5→CO2 bridge
   run_all.py              all three, with a --quick mode
 
-tests/                    ~120 tests: loss gradients, simulator physics
+tests/                    155 tests: loss gradients, simulator physics
                           (conservation, capacity, tidal direction), leakage
-                          guards, decision policies, clustering, estimators.
+                          guards, decision policies and the Bayes rule,
+                          calibrators, clustering, estimators.
 ```
 
 Run `make help` for the shortcuts.
@@ -769,7 +863,7 @@ Run `make help` for the shortcuts.
    properties of this simulator's parameters and should not be quoted as
    findings about the real Harbour Line.
 2. **The cost matrix is asserted, not measured.** Every headline number is
-   conditional on it. That is why §6.5's sensitivity analysis exists: the honest
+   conditional on it. That is why §6.6's sensitivity analysis exists: the honest
    claim is not "the cost falls 43%" but "here is how the model changes as you
    change the cost ratio, and the relationship is monotone and interpretable."
    Getting real numbers would mean pricing a relief rake, staff time, and
@@ -796,12 +890,17 @@ Run `make help` for the shortcuts.
 - Replace `simulate.py` with a loader for AFC/UTS gate counts and whatever
   coach-level signal exists (CCTV head-count, load cells, Wi-Fi/BLE probe
   counts). `features.py` and everything downstream would not change.
-- Re-estimate the cost matrix with the operator, and re-run §6.5's sensitivity
+- Re-estimate the cost matrix with the operator, and re-run §6.6's sensitivity
   sweep as the *deliverable* rather than as a robustness check.
 - Validate the band cut-points against incident records.
 - Deploy the `realtime` feature set for intervention and the `schedule` set for
   overnight planning, since they answer different questions and only one of
   them needs telemetry.
+- Re-fit the band classifier's probabilities on a rolling window rather than a
+  fixed one. §6.5 shows post-hoc calibration transferring an expired base rate
+  across a single seasonal boundary; in production that boundary arrives every
+  year, and the answer is to keep the training window moving rather than to
+  add a calibrator on top.
 - Monitor the under-prediction rate on DANGEROUS coaches as the production SLO.
   RMSE is the wrong thing to alert on.
 
