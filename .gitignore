@@ -1,0 +1,26 @@
+# Generated data: rebuild with `python scripts/01_generate_data.py`
+data/*.csv
+data/*.csv.gz
+data/*.parquet
+
+# Generated outputs: rebuild with `make all`
+reports/figures/*.png
+reports/tables/*.csv
+reports/tables/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
