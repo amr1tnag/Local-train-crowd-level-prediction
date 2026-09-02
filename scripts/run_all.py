@@ -2,7 +2,7 @@
 """Run the whole project end to end.
 
     python scripts/run_all.py                 # full run (~15 min)
-    python scripts/run_all.py --quick         # 45 days, fewer rounds (~4 min)
+    python scripts/run_all.py --quick         # 60 days, fewer rounds (~5 min)
 
 Equivalent to running 01, 02 and 03 in order; exists so that a fresh clone
 reproduces every number and every figure in the report with one command.
@@ -29,20 +29,28 @@ def run(cmd: list[str]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--quick", action="store_true", help="smaller simulation and fewer boosting rounds")
+    ap.add_argument("--quick", action="store_true",
+                    help="60 days instead of 180, fewer boosting rounds, smaller holdout")
     ap.add_argument("--skip-data", action="store_true", help="reuse the dataset already in data/")
     ap.add_argument("--k", type=int, default=4)
     args = ap.parse_args()
 
     py = sys.executable
-    days = 45 if args.quick else 180
-    rounds = 250 if args.quick else 700
+    days = 60 if args.quick else 180
+    rounds = 300 if args.quick else 1200
     bootstrap = 15 if args.quick else 60
+    # The default 18/24-day holdout is sized for a 180-day run; on a short run
+    # it would leave almost nothing to train on, so scale it with the horizon.
+    val_days = 8 if args.quick else 18
+    test_days = 12 if args.quick else 24
+    scan_bootstrap = 8 if args.quick else 25
 
     if not args.skip_data:
         run([py, "scripts/01_generate_data.py", "--days", str(days), "--monitored", "0.08"])
-    run([py, "scripts/02_train_regression.py", "--rounds", str(rounds)])
-    run([py, "scripts/03_cluster_stations.py", "--k", str(args.k), "--bootstrap", str(bootstrap)])
+    run([py, "scripts/02_train_regression.py", "--rounds", str(rounds),
+         "--val-days", str(val_days), "--test-days", str(test_days)])
+    run([py, "scripts/03_cluster_stations.py", "--k", str(args.k),
+         "--bootstrap", str(bootstrap), "--scan-bootstrap", str(scan_bootstrap)])
 
     print("\nAll steps complete.")
     print(f"  figures : {ROOT / 'reports' / 'figures'}")

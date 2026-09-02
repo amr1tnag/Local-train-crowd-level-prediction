@@ -122,10 +122,11 @@ def main() -> int:
     elbow_k = verdict["elbow (max distance to chord)"]
 
     print(f"\n  chosen: k = {args.k}, and the reasoning is worth stating rather than hiding.")
-    print( "  Silhouette and Calinski-Harabasz favour the coarsest split available, which on 35")
-    print( "  points is what those indices always do; Davies-Bouldin and the GMM BIC run off to")
-    print( "  the top of the range, which is overfitting 53 dimensions with 35 observations.")
-    print( "  The two informative criteria here are the elbow and the bootstrap.")
+    print( "  The internal indices split two ways, and neither failure mode is informative:")
+    print( "  some favour the coarsest partition available, which on 35 points is what they")
+    print( "  usually do, and some run to the top of the k range, which is what fitting 53")
+    print( "  dimensions with 35 observations looks like.  The two criteria that do carry")
+    print( "  information here are the elbow and the bootstrap.")
     print(f"    - the elbow sits at k = {elbow_k}")
     if stable:
         stable_txt = ", ".join(

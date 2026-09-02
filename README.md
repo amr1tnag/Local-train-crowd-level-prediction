@@ -79,7 +79,7 @@ git clone <this repo> && cd Local-train-crowd-level-prediction
 pip install -r requirements.txt
 
 python scripts/run_all.py            # everything, ~15 min
-python scripts/run_all.py --quick    # 45 days instead of 180, ~4 min
+python scripts/run_all.py --quick    # 60 days instead of 180, ~5 min
 ```
 
 Or step by step:
@@ -604,11 +604,12 @@ answers. That is reported rather than smoothed over:
 | GMM BIC (min) | k = 10 |
 | **bootstrap stability (max ARI)** | k = 3 |
 
-Silhouette and Calinski-Harabasz favour the coarsest split available, which on
-35 points is what those indices always do. Davies-Bouldin and the BIC run off
-to the top of the range, which is what happens when you fit 53 dimensions with
-35 observations. The two informative criteria are the elbow and the bootstrap,
-and reading them together settles it:
+The internal indices split two ways and neither failure mode is informative:
+some favour the coarsest partition available, which on 35 points is what they
+usually do, and some run to the top of the k range, which is what fitting 53
+dimensions with 35 observations looks like. The two criteria that do carry
+information are the elbow and the bootstrap, and reading them together settles
+it:
 
 | k | bootstrap ARI (25 resamples of days) |
 |---|---|

@@ -118,6 +118,10 @@ def main() -> int:
     ap.add_argument("--out", type=str, default="reports")
     ap.add_argument("--feature-set", type=str, default="schedule", choices=["schedule", "realtime"])
     ap.add_argument("--rounds", type=int, default=ModelConfig.n_estimators)
+    ap.add_argument("--val-days", type=int, default=ModelConfig.val_days,
+                    help="days held out for early stopping and threshold tuning")
+    ap.add_argument("--test-days", type=int, default=ModelConfig.test_days,
+                    help="final days held out for reporting")
     ap.add_argument("--skip-quantile", action="store_true")
     ap.add_argument("--skip-sensitivity", action="store_true")
     args = ap.parse_args()
@@ -127,7 +131,8 @@ def main() -> int:
     figdir.mkdir(parents=True, exist_ok=True)
     tabdir.mkdir(parents=True, exist_ok=True)
 
-    mcfg = ModelConfig(n_estimators=args.rounds)
+    mcfg = ModelConfig(n_estimators=args.rounds, val_days=args.val_days,
+                       test_days=args.test_days)
     tau = optimal_quantile()
 
     banner("CO2 | Loading data and building the design matrix")
