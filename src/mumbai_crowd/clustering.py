@@ -392,13 +392,22 @@ def name_clusters(result: ClusterResult) -> dict[int, str]:
     """
     s = cluster_summary(result)
     names: dict[int, str] = {}
-    vol_median = s["log_daily_boardings"].median()
+
+    # A volume qualifier is attached only when the cluster is genuinely at one
+    # end of the range.  A median split would force every cluster into "high"
+    # or "low" and end up calling a group containing Andheri, Bandra and Kurla
+    # low-volume simply because two clusters have to be on that side -- and a
+    # fifteen-station cluster spanning Andheri to Chunabhatti does not have a
+    # meaningful single volume anyway.  When in doubt, say nothing: the
+    # behavioural half of the label is the informative half.
+    vol = s["log_daily_boardings"]
+    spread = float(vol.std(ddof=0))
+    z = (vol - vol.mean()) / (spread if spread > 1e-9 else 1.0)
 
     for cid, row in s.iterrows():
         am_source = row["am_net_source"]
         pm_source = row["pm_net_source"]
-        big = row["log_daily_boardings"] >= vol_median
-        interchange = row["interchange_share"] >= 0.5
+        interchange = row["interchange_share"] >= 0.4
 
         if am_source > 0.25 and pm_source < -0.1:
             base = "morning-source dormitory"
@@ -413,8 +422,13 @@ def name_clusters(result: ClusterResult) -> dict[int, str]:
         else:
             base = "net commercial"
 
-        qualifier = "high-volume" if big else "low-volume"
-        names[int(cid)] = f"{qualifier} {base}"
+        zi = float(z.loc[cid])
+        if zi > 0.8:
+            names[int(cid)] = f"high-volume {base}"
+        elif zi < -0.8:
+            names[int(cid)] = f"low-volume {base}"
+        else:
+            names[int(cid)] = base
 
     # Disambiguate collisions so two clusters never share a label.
     seen: dict[str, int] = {}

@@ -81,25 +81,43 @@ def fig_loss_shapes(losses: dict[str, object], outdir: Path | None = None) -> Pa
 
     The single most useful figure in the report: it shows, in one glance, that
     every asymmetric loss is a bowl with one steep wall, and which wall.
+
+    Each curve is rescaled to pass through 1.0 at one unit of *under*-
+    prediction.  Without that, the quadratic losses are two orders of
+    magnitude taller than the piecewise-linear ones and the panel becomes a
+    picture of their absolute scale -- which is arbitrary, since a loss can be
+    multiplied by any positive constant without changing its minimiser.  What
+    is *not* arbitrary is the ratio between the two walls, and normalising is
+    what makes that ratio the visible thing.
     """
     use_house_style()
     r = np.linspace(-6, 6, 601)          # r = y_pred - y_true
     y_true = np.zeros_like(r)
+    ref = np.array([-1.0])               # one unit short of the truth
 
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.6))
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.8))
+    colours = plt.cm.viridis(np.linspace(0.05, 0.85, len(losses)))
     for ax, (title, scale) in zip(axes, [("Loss", "linear"), ("Loss (log scale)", "log")]):
-        for (name, loss), colour in zip(losses.items(), plt.cm.viridis(np.linspace(0.05, 0.85, len(losses)))):
-            ax.plot(r, loss.elementwise(y_true, r), label=name, color=colour, lw=1.8)
+        for (name, loss), colour in zip(losses.items(), colours):
+            scale_factor = float(loss.elementwise(np.zeros(1), ref)[0])
+            curve = loss.elementwise(y_true, r) / max(scale_factor, 1e-12)
+            ax.plot(r, curve, label=name, color=colour, lw=1.8)
         ax.axvline(0, color=NEUTRAL, lw=0.8, ls=":")
         ax.set_yscale(scale)
         ax.set_xlabel("prediction error  (predicted - actual, standees/m²)")
-        ax.set_ylabel("loss")
+        ax.set_ylabel("loss, normalised to 1.0 at one unit short")
         ax.set_title(title)
         ax.axvspan(-6, 0, color=ACCENT, alpha=0.06, lw=0)
-    axes[0].text(-5.6, axes[0].get_ylim()[1] * 0.88, "UNDER-predicted\n(the dangerous side)",
-                 color=ACCENT, fontsize=8.5, va="top", fontweight="bold")
-    axes[0].legend(loc="upper right", fontsize=8)
-    fig.suptitle("Asymmetric losses penalise under-prediction far more steeply", y=1.02, fontsize=11)
+    axes[0].set_ylim(0, 26)
+    axes[0].text(-5.85, 2.2, "UNDER-predicted\n(the dangerous side)",
+                 color=ACCENT, fontsize=8.5, va="bottom", fontweight="bold")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, ncol=len(labels), fontsize=8.5,
+               loc="lower center", bbox_to_anchor=(0.5, -0.07))
+    fig.suptitle(
+        "Same scale at one unit short: the asymmetry is the gap between the two walls",
+        y=1.02, fontsize=11,
+    )
     return _save(fig, "01_loss_shapes.png", outdir)
 
 
@@ -147,15 +165,20 @@ def fig_demand_surface(df: pd.DataFrame, outdir: Path | None = None) -> Path:
         piv = (
             sub[sub["direction"] == direction]
             .pivot_table(index="station_code", columns="hour", values="density_depart", aggfunc="mean")
-            .reindex(stops)
+            .reindex(index=stops)
+            # Hours 2-3 have no services, so the pivot's columns are not
+            # contiguous.  Without reindexing to a full 0..23 range imshow
+            # spreads the surviving columns evenly across the extent and every
+            # hour label silently shifts.
+            .reindex(columns=range(24))
         )
         im = ax.imshow(piv.to_numpy(), aspect="auto", cmap=cmap, vmin=0, vmax=12,
-                       extent=[piv.columns.min() - 0.5, piv.columns.max() + 0.5, len(stops) - 0.5, -0.5])
+                       extent=[-0.5, 23.5, len(stops) - 0.5, -0.5])
         ax.set_xticks(range(4, 24, 2))
+        ax.set_xlim(3.5, 23.5)
         ax.set_title(f"{title}   weekdays")
         ax.set_xlabel("hour of day")
         ax.grid(False)
-    axes[0].set_yticks(range(len(stops)))
     axes[0].set_yticks(range(len(stops)))
     axes[0].set_yticklabels([st.loc[c, "name"][:18] for c in stops], fontsize=6.5)
     cb = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
@@ -203,18 +226,19 @@ def fig_model_comparison(board: pd.DataFrame, outdir: Path | None = None) -> Pat
         ("dangerous_miss", "P(said safe | truly dangerous)", "lower is better", True),
         ("false_alarm", "P(escalated | truly below crush)", "lower is better", True),
     ]
-    fig, axes = plt.subplots(1, 4, figsize=(13.5, 3.8))
+    fig, axes = plt.subplots(1, 4, figsize=(13.5, 3.8), sharey=True)
     order = board.sort_values("exp_cost_inr").index
-    for ax, (col, title, sub, pct) in zip(axes, panels):
+    for i, (ax, (col, title, sub, pct)) in enumerate(zip(axes, panels)):
         vals = board.loc[order, col].to_numpy() * (100 if pct else 1)
-        colours = [ACCENT if i == np.argmin(vals) else NEUTRAL for i in range(len(vals))]
+        colours = [ACCENT if j == int(np.argmin(vals)) else NEUTRAL for j in range(len(vals))]
         ax.barh(range(len(order)), vals, color=colours)
-        ax.set_yticks(range(len(order)))
-        ax.set_yticklabels(order, fontsize=7.5)
-        ax.invert_yaxis()
         ax.set_title(f"{title}\n({sub})", fontsize=9)
         if pct:
             ax.set_xlabel("%")
+    # Model names once, on the left, instead of four times over the bars.
+    axes[0].set_yticks(range(len(order)))
+    axes[0].set_yticklabels(order, fontsize=7.5)
+    axes[0].invert_yaxis()
     fig.suptitle("Same features, same model family — only the loss changes", y=1.03, fontsize=11)
     return _save(fig, "05_model_comparison.png", outdir)
 
@@ -240,7 +264,7 @@ def fig_prediction_scatter(y_true, preds: dict[str, np.ndarray], outdir: Path | 
 
 def fig_residual_asymmetry(y_true, preds: dict[str, np.ndarray], outdir: Path | None = None) -> Path:
     use_house_style()
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 3.8), gridspec_kw={"wspace": 0.55})
     colours = plt.cm.viridis(np.linspace(0.05, 0.85, len(preds)))
 
     for (name, p), c in zip(preds.items(), colours):
@@ -250,7 +274,7 @@ def fig_residual_asymmetry(y_true, preds: dict[str, np.ndarray], outdir: Path | 
     axes[0].axvspan(-8, 0, color=ACCENT, alpha=0.06, lw=0)
     axes[0].set_xlabel("residual (predicted - actual)")
     axes[0].set_ylabel("density")
-    axes[0].set_title("Asymmetric losses shift the whole residual distribution right")
+    axes[0].set_title("Residuals shift right")
     axes[0].legend(fontsize=7.5)
 
     danger = np.asarray(y_true) >= BAND_EDGES[-1]
@@ -258,11 +282,15 @@ def fig_residual_asymmetry(y_true, preds: dict[str, np.ndarray], outdir: Path | 
     for name, p in preds.items():
         names.append(name)
         vals.append(float(np.mean(np.maximum(np.asarray(y_true)[danger] - np.asarray(p)[danger], 0))))
-    axes[1].barh(names, vals, color=[ACCENT if v == min(vals) else NEUTRAL for v in vals])
+    axes[1].barh(range(len(names)), vals,
+                 color=[ACCENT if v == min(vals) else NEUTRAL for v in vals])
+    axes[1].set_yticks(range(len(names)))
+    axes[1].set_yticklabels(names, fontsize=7.5)
     axes[1].invert_yaxis()
-    axes[1].tick_params(axis="y", labelsize=7.5)
     axes[1].set_xlabel("mean shortfall on DANGEROUS coaches (standees/m²)")
-    axes[1].set_title("How far short the model falls when it matters")
+    fig.suptitle("Asymmetric losses move the whole distribution, and shrink the dangerous tail",
+                 y=1.03, fontsize=11)
+    axes[1].set_title("Shortfall where it matters")
     return _save(fig, "07_residual_asymmetry.png", outdir)
 
 
@@ -368,33 +396,87 @@ def fig_quantile_calibration(y_true, qpred: np.ndarray, taus, outdir: Path | Non
     return _save(fig, "12_quantile_calibration.png", outdir)
 
 
+def fig_danger_reliability(table: pd.DataFrame, outdir: Path | None = None) -> Path:
+    """Plot a reliability table from :func:`metrics.danger_reliability_table`.
+
+    The Bayes decision rule is only optimal if the probabilities it consumes
+    are *conditionally* calibrated -- marginal coverage is not enough.  Points
+    below the diagonal mean the model is over-confident about danger; points
+    above mean it is under-stating it, and under-stating a 1.5% event is
+    exactly how a theoretically optimal policy ends up refusing to act.
+    """
+    use_house_style()
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.8))
+    lim = max(float(table[["predicted", "observed"]].to_numpy().max()) * 1.15, 0.05)
+    axes[0].plot([0, lim], [0, lim], ls="--", color=NEUTRAL, lw=1.0, label="perfect calibration")
+    axes[0].plot(table["predicted"], table["observed"], marker="o", color=ACCENT, lw=1.6,
+                 label="quantile ensemble")
+    axes[0].set_xlabel("predicted P(DANGEROUS)")
+    axes[0].set_ylabel("observed frequency")
+    axes[0].set_xlim(0, lim)
+    axes[0].set_ylim(0, lim)
+    axes[0].set_title("Reliability of the danger probability")
+    axes[0].legend(fontsize=8)
+
+    axes[1].bar(range(len(table)), table["n"], color=NEUTRAL)
+    axes[1].set_yscale("log")
+    axes[1].set_xticks(range(len(table)))
+    axes[1].set_xticklabels([f"{v:.3f}" for v in table["predicted"]], rotation=45, fontsize=7)
+    axes[1].set_xlabel("bin (mean predicted probability)")
+    axes[1].set_ylabel("coach-arrivals (log)")
+    axes[1].set_title("How much data sits in each bin")
+    fig.suptitle("A Bayes rule is only as good as the probabilities it is fed", y=1.02, fontsize=11)
+    return _save(fig, "13_danger_reliability.png", outdir)
+
+
 # ---------------------------------------------------------------------------
 # CO5 -- clustering
 # ---------------------------------------------------------------------------
 
 
 def fig_k_selection(indices: pd.DataFrame, gmm: pd.DataFrame, chosen_k: int,
-                    outdir: Path | None = None) -> Path:
+                    stability: pd.Series | None = None, outdir: Path | None = None) -> Path:
+    """Every criterion for choosing k, side by side, disagreeing openly.
+
+    The last panel is the one that should carry the most weight and usually
+    gets left out: how reproducible the partition is when the *days* are
+    resampled.  Internal indices measure how tidy a partition looks on the
+    sample you happen to have; stability measures whether you would have found
+    the same partition at all on a different sample.
+    """
     use_house_style()
-    fig, axes = plt.subplots(1, 4, figsize=(13.5, 3.2))
     specs = [
-        ("inertia", "Within-cluster SSE", "elbow"),
-        ("silhouette", "Silhouette (higher better)", "max"),
-        ("davies_bouldin", "Davies-Bouldin (lower better)", "min"),
-        ("calinski_harabasz", "Calinski-Harabasz (higher better)", "max"),
+        ("inertia", "Within-cluster SSE\n(+ GMM BIC)"),
+        ("silhouette", "Silhouette\n(higher better)"),
+        ("davies_bouldin", "Davies-Bouldin\n(lower better)"),
+        ("calinski_harabasz", "Calinski-Harabasz\n(higher better)"),
     ]
-    for ax, (col, title, _) in zip(axes, specs):
+    n_panels = len(specs) + (1 if stability is not None else 0)
+    fig, axes = plt.subplots(1, n_panels, figsize=(3.1 * n_panels, 3.4),
+                             gridspec_kw={"wspace": 0.45})
+    for ax, (col, title) in zip(axes, specs):
         ax.plot(indices.index, indices[col], marker="o", ms=4, color=NEUTRAL)
         ax.axvline(chosen_k, color=ACCENT, lw=1.4, ls="--")
         ax.set_title(title, fontsize=9)
         ax.set_xlabel("k")
-    axes[0].set_ylabel("value")
     ax2 = axes[0].twinx()
-    ax2.plot(gmm.index, gmm["bic"], marker="s", ms=3.5, color="#7a5195", alpha=0.8)
+    ax2.plot(gmm.index, gmm["bic"], marker="s", ms=3.5, color="#7a5195", alpha=0.85)
     ax2.set_ylabel("GMM BIC", color="#7a5195", fontsize=8)
     ax2.grid(False)
-    fig.suptitle(f"Internal indices disagree; k = {chosen_k} is a judgement call, stated as one",
-                 y=1.04, fontsize=11)
+
+    if stability is not None:
+        ax = axes[-1]
+        st = stability.dropna()
+        ax.plot(st.index, st.to_numpy(), marker="o", ms=5, color=ACCENT, lw=1.8)
+        ax.axvline(chosen_k, color=ACCENT, lw=1.4, ls="--")
+        ax.set_ylim(0, 1.05)
+        ax.set_title("Bootstrap stability\n(ARI, higher better)", fontsize=9)
+        ax.set_xlabel("k")
+
+    fig.suptitle(
+        f"Internal indices disagree; k = {chosen_k} is chosen on the elbow and on stability",
+        y=1.05, fontsize=11,
+    )
     return _save(fig, "20_k_selection.png", outdir)
 
 
@@ -469,7 +551,16 @@ def fig_cluster_profiles(result, outdir: Path | None = None) -> Path:
 
 
 def fig_line_map(result, outdir: Path | None = None) -> Path:
-    """Schematic Harbour-line map with stations coloured by cluster."""
+    """Schematic Harbour-line map with stations coloured by cluster role.
+
+    Drawn as a branching schematic on *sequence* rather than chainage, for the
+    same reason every real transit map is: on a true distance axis the eight
+    stations between CSMT and Vadala Road occupy nine kilometres and their
+    labels become an unreadable pile, while Kharghar to Panvel gets eight
+    kilometres of empty paper.  The trunk is drawn once and the two branches
+    diverge from Vadala Road, which is also the honest topology -- the earlier
+    two-row version duplicated every trunk station.
+    """
     use_house_style()
     from .network import ROUTES, load_stations
 
@@ -477,33 +568,59 @@ def fig_line_map(result, outdir: Path | None = None) -> Path:
     labels, names = result.labels, result.names
     palette = BAND_COLORS + ["#7a5195", "#00798c", "#8d6e63"]
 
-    fig, ax = plt.subplots(figsize=(12.5, 4.6))
-    lines = [("CSMT_PNVL", 0.0, "CSMT – Panvel"), ("CSMT_GMN", 1.0, "CSMT – Goregaon")]
-    for route, y, title in lines:
-        stops = ROUTES[route]
-        xs = [st.loc[c, "km"] for c in stops]
-        ax.plot(xs, [y] * len(xs), color="#b9c0c5", lw=3.5, zorder=1, solid_capstyle="round")
-        for c, x in zip(stops, xs):
-            cid = int(labels[c])
-            ax.scatter([x], [y], s=110, color=palette[cid % len(palette)], zorder=3,
-                       edgecolor="white", lw=1.2)
-            ax.annotate(st.loc[c, "name"], (x, y), rotation=55, fontsize=6.4,
-                        textcoords="offset points", xytext=(3, 9 if y == 0 else -22),
-                        ha="left", va="bottom" if y == 0 else "top", color="#22282c")
-        ax.text(-2.5, y, title, ha="right", va="center", fontsize=9, fontweight="bold")
+    trunk = ROUTES["CSMT_PNVL"][:8]          # CSMT .. Vadala Road, shared
+    panvel = ROUTES["CSMT_PNVL"][8:]
+    goregaon = ROUTES["CSMT_GMN"][8:]
+    assert ROUTES["CSMT_GMN"][:8] == trunk, "the two patterns no longer share a trunk"
+
+    fig, ax = plt.subplots(figsize=(13.5, 5.6))
+
+    def _draw(codes, xs, y, label_above: bool):
+        ax.plot(xs, [y] * len(xs), color="#b9c0c5", lw=4.0, zorder=1, solid_capstyle="round")
+        for code, x in zip(codes, xs):
+            cid = int(labels[code])
+            ax.scatter([x], [y], s=130, color=palette[cid % len(palette)], zorder=3,
+                       edgecolor="white", lw=1.4)
+            ax.annotate(
+                st.loc[code, "name"], (x, y), rotation=90, fontsize=7,
+                textcoords="offset points", xytext=(0, 11 if label_above else -11),
+                ha="center", va="bottom" if label_above else "top", color="#22282c",
+            )
+
+    trunk_x = list(range(len(trunk)))
+    branch_x0 = len(trunk)
+    gore_x = [branch_x0 + i for i in range(len(goregaon))]
+    pnvl_x = [branch_x0 + i for i in range(len(panvel))]
+
+    # Connectors from the last trunk station into each branch.
+    ax.plot([trunk_x[-1], gore_x[0]], [0, 1.9], color="#b9c0c5", lw=4.0, zorder=1)
+    ax.plot([trunk_x[-1], pnvl_x[0]], [0, -1.9], color="#b9c0c5", lw=4.0, zorder=1)
+
+    _draw(trunk, trunk_x, 0.0, label_above=True)
+    _draw(goregaon, gore_x, 1.9, label_above=True)
+    _draw(panvel, pnvl_x, -1.9, label_above=False)
+
+    ax.text(gore_x[-1] + 0.6, 1.9, "to Goregaon", fontsize=9, fontweight="bold",
+            va="center", color="#22282c")
+    ax.text(pnvl_x[-1] + 0.6, -1.9, "to Panvel", fontsize=9, fontweight="bold",
+            va="center", color="#22282c")
+    ax.text(-0.6, 0.0, "CSMT\ntrunk", fontsize=9, fontweight="bold", ha="right",
+            va="center", color="#22282c")
 
     handles = [
-        plt.Line2D([], [], marker="o", ls="", ms=8, color=palette[c % len(palette)],
+        plt.Line2D([], [], marker="o", ls="", ms=9, color=palette[c % len(palette)],
                    label=names.get(int(c), f"cluster {c}"))
         for c in sorted(set(labels))
     ]
-    ax.legend(handles=handles, fontsize=8, loc="upper center", ncol=len(handles), bbox_to_anchor=(0.5, 1.22))
-    ax.set_xlabel("route km from CSMT")
-    ax.set_ylim(-0.75, 1.75)
+    ax.legend(handles=handles, fontsize=8.5, loc="upper center",
+              ncol=min(len(handles), 4), bbox_to_anchor=(0.5, 1.14))
+    ax.set_xlim(-3.0, max(pnvl_x[-1], gore_x[-1]) + 3.4)
+    ax.set_ylim(-4.6, 4.2)
+    ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_xlim(-16, 55)
-    ax.grid(axis="y", visible=False)
-    ax.spines["left"].set_visible(False)
+    ax.grid(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_visible(False)
     return _save(fig, "24_line_map.png", outdir)
 
 

@@ -31,7 +31,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--quick", action="store_true", help="smaller simulation and fewer boosting rounds")
     ap.add_argument("--skip-data", action="store_true", help="reuse the dataset already in data/")
-    ap.add_argument("--k", type=int, default=5)
+    ap.add_argument("--k", type=int, default=4)
     args = ap.parse_args()
 
     py = sys.executable

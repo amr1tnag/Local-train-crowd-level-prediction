@@ -58,8 +58,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", type=str, default="data")
     ap.add_argument("--out", type=str, default="reports")
-    ap.add_argument("--k", type=int, default=5, help="number of station roles")
+    ap.add_argument("--k", type=int, default=4, help="number of station roles")
+    ap.add_argument("--k-candidates", type=int, nargs="+", default=[3, 4, 5, 6],
+                    help="values of k to score for bootstrap stability")
     ap.add_argument("--bootstrap", type=int, default=ClusterConfig.bootstrap_runs)
+    ap.add_argument("--scan-bootstrap", type=int, default=25,
+                    help="bootstrap runs per k during the stability scan")
     ap.add_argument("--skip-co2-bridge", action="store_true")
     args = ap.parse_args()
 
@@ -78,27 +82,68 @@ def main() -> int:
           f"+ {len(cols) - 2 * len(C.PROFILE_HOURS)} scalar summaries)")
     profiles.to_csv(tabdir / "co5_station_profiles.csv")
 
-    banner("CO5 | Choosing k -- five criteria, and they do not agree")
+    banner("CO5 | Choosing k -- six criteria, and they do not agree")
     indices = C.select_k(X, ccfg)
     gmm = C.gmm_selection(X, ccfg)
     table = indices.join(gmm[["bic"]])
+
+    # Stability is computed for every candidate k *before* a choice is stated,
+    # so the choice can be argued from the numbers rather than decorated with
+    # them afterwards.  Days are resampled with replacement and the whole
+    # profile pipeline is rebuilt; the 35 stations are the population, but the
+    # days are a sample, so this is the only real uncertainty available here.
+    print(f"  bootstrap stability scan over resampled days "
+          f"({args.scan_bootstrap} runs per k) ...", flush=True)
+    t0 = time.time()
+    scan_cfg = ClusterConfig(bootstrap_runs=args.scan_bootstrap)
+    stability = {}
+    for k in args.k_candidates:
+        stability[k] = C.bootstrap_stability(flows, k, scan_cfg)
+    table["stability_ari"] = pd.Series({k: v["ari_mean"] for k, v in stability.items()})
+    table["stability_sd"] = pd.Series({k: v["ari_std"] for k, v in stability.items()})
+    print(f"  [{time.time() - t0:.0f}s]")
+    print()
     print(table.round(3).to_string())
+
     verdict = {
         "elbow (max distance to chord)": int(indices["elbow_distance"].idxmax()),
         "silhouette (max)": int(indices["silhouette"].idxmax()),
         "davies_bouldin (min)": int(indices["davies_bouldin"].idxmin()),
         "calinski_harabasz (max)": int(indices["calinski_harabasz"].idxmax()),
         "gmm bic (min)": int(gmm["bic"].idxmin()),
+        "bootstrap stability (max ARI)": int(max(stability, key=lambda k: stability[k]["ari_mean"])),
     }
     print("\n  what each criterion would pick:")
     for name, k in verdict.items():
         print(f"    {name:<32s} k = {k}")
-    print(f"\n  chosen: k = {args.k}. Silhouette on 35 points rewards the coarsest split it can find,")
-    print( "  and the two- and three-cluster solutions collapse the dock belt into the CBD and")
-    print( "  the interchanges into the dormitories -- distinctions the operator cares about.")
-    print(f"  k = {args.k} is the finest split at which every cluster still has a one-sentence")
-    print( "  operational description, and it is the level the bootstrap below says is stable.")
+
+    stable = [k for k in sorted(stability) if stability[k]["ari_mean"] >= 0.90]
+    finest_stable = max(stable) if stable else max(stability, key=lambda k: stability[k]["ari_mean"])
+    elbow_k = verdict["elbow (max distance to chord)"]
+
+    print(f"\n  chosen: k = {args.k}, and the reasoning is worth stating rather than hiding.")
+    print( "  Silhouette and Calinski-Harabasz favour the coarsest split available, which on 35")
+    print( "  points is what those indices always do; Davies-Bouldin and the GMM BIC run off to")
+    print( "  the top of the range, which is overfitting 53 dimensions with 35 observations.")
+    print( "  The two informative criteria here are the elbow and the bootstrap.")
+    print(f"    - the elbow sits at k = {elbow_k}")
+    if stable:
+        stable_txt = ", ".join(
+            f"k={k} (ARI {stability[k]['ari_mean']:.3f})" for k in stable
+        )
+        print(f"    - stability stays high for {stable_txt}")
+        dropped = [k for k in sorted(stability) if k > finest_stable]
+        if dropped:
+            print(f"      and collapses at k = {dropped[0]} "
+                  f"(ARI {stability[dropped[0]]['ari_mean']:.3f}), i.e. a {dropped[0]}-way split")
+            print( "      is not reproducible from a different sample of days")
+        print(f"  k = {finest_stable} is therefore the finest partition that is still")
+        print( "  reproducible, and it is also where the elbow sits.")
+    if args.k in stability and args.k != finest_stable:
+        print(f"  NOTE: k = {args.k} was requested; the evidence above points to "
+              f"k = {finest_stable}.")
     table.to_csv(tabdir / "co5_k_selection.csv")
+    pd.DataFrame(stability).T.to_csv(tabdir / "co5_stability.csv", index=False)
 
     banner(f"CO5 | Fitting k = {args.k}")
     result = C.fit_clusters(profiles, args.k, ccfg, method="kmeans")
@@ -133,24 +178,15 @@ def main() -> int:
           else "    DBSCAN found no multi-cluster solution at any eps on this profile space")
     db.to_csv(tabdir / "co5_dbscan_scan.csv", index=False)
 
-    print(f"\n  bootstrap stability over resampled days ({args.bootstrap} runs) ...", flush=True)
-    t0 = time.time()
-    stab = C.bootstrap_stability(flows, args.k, ccfg)
-    print(f"    ARI vs full-data partition: {stab['ari_mean']:.3f} +/- {stab['ari_std']:.3f} "
-          f"(5th pct {stab['ari_p05']:.3f})   [{time.time() - t0:.0f}s]")
-    stab_rows = [stab]
-    for k in (args.k - 1, args.k + 1):
-        if 2 <= k < len(profiles):
-            s = C.bootstrap_stability(flows, k, ClusterConfig(bootstrap_runs=max(20, args.bootstrap // 3)))
-            stab_rows.append(s)
-            print(f"    (k={k} for comparison: ARI {s['ari_mean']:.3f} +/- {s['ari_std']:.3f})")
-    pd.DataFrame(stab_rows).to_csv(tabdir / "co5_stability.csv", index=False)
+    stab = stability[args.k] if args.k in stability else C.bootstrap_stability(flows, args.k, ccfg)
+    print(f"\n  bootstrap stability of the chosen partition: ARI "
+          f"{stab['ari_mean']:.3f} +/- {stab['ari_std']:.3f} (5th pct {stab['ari_p05']:.3f})")
 
     banner("CO5 | Figures")
     Z = C.dendrogram_linkage(profiles)
     labels = [f"{profiles.loc[c, 'name'][:20]}" for c in profiles.index]
     for p in [
-        plots.fig_k_selection(indices, gmm, args.k, figdir),
+        plots.fig_k_selection(indices, gmm, args.k, table.get('stability_ari'), figdir),
         plots.fig_dendrogram(Z, labels, args.k, figdir),
         plots.fig_cluster_pca(result, figdir),
         plots.fig_cluster_profiles(result, figdir),

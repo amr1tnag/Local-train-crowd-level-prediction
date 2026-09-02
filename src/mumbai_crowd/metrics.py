@@ -172,6 +172,40 @@ def intervention_rate(y_true, y_pred) -> float:
     return float(np.mean(density_to_band(y_pred) >= 2))
 
 
+def danger_reliability_table(
+    p_danger, y_true, edges: np.ndarray | None = None, min_count: int = 30
+) -> pd.DataFrame:
+    """Reliability of a predicted P(DANGEROUS) against observed frequency.
+
+    A Bayes decision rule is optimal only when the probabilities it consumes
+    are *conditionally* calibrated; marginal coverage is not enough.  Binning
+    by predicted probability and comparing to what actually happened is the
+    test.  Bins holding fewer than ``min_count`` arrivals are dropped, because
+    on a ~1.5% event a bin of ten tells you nothing.
+    """
+    p_danger = np.asarray(p_danger, dtype=float)
+    truth = (density_to_band(y_true) == 3).astype(float)
+    if edges is None:
+        edges = np.array([0.0, 0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0])
+    idx = np.clip(np.searchsorted(edges, p_danger, side="right") - 1, 0, len(edges) - 2)
+
+    rows = []
+    for b in range(len(edges) - 1):
+        m = idx == b
+        if m.sum() < min_count:
+            continue
+        rows.append(
+            {
+                "bin_low": float(edges[b]),
+                "bin_high": float(edges[b + 1]),
+                "predicted": float(p_danger[m].mean()),
+                "observed": float(truth[m].mean()),
+                "n": int(m.sum()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -241,6 +275,7 @@ def leaderboard(results: dict[str, dict[str, float]]) -> pd.DataFrame:
 
 __all__ = [
     "METRIC_GLOSSARY",
+    "danger_reliability_table",
     "REPORT_COLUMNS",
     "asymmetric_cost",
     "band_confusion",

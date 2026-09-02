@@ -27,7 +27,7 @@ in :data:`LEAKY_COLUMNS` and never enters either.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -151,6 +151,8 @@ class HistoricalProfileEncoder:
         ("station_code", "coach_position", "direction"),
         ("route", "hour", "direction"),
     )
+    #: Populated by fit(): encoded-column name -> the key columns it groups on.
+    key_of_: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
 
     def fit(self, df: pd.DataFrame, target: str = TARGET) -> "HistoricalProfileEncoder":
         self.global_mean_ = float(df[target].mean())
@@ -164,11 +166,6 @@ class HistoricalProfileEncoder:
             self.tables_[name] = shrunk.rename(name).reset_index()
             self.key_of_[name] = list(key)
         return self
-
-    key_of_: dict[str, list[str]] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        self.key_of_ = {}
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if not hasattr(self, "tables_"):

@@ -23,7 +23,7 @@ co2:
 	$(PY) scripts/02_train_regression.py
 
 co5:
-	$(PY) scripts/03_cluster_stations.py --k 5
+	$(PY) scripts/03_cluster_stations.py --k 4
 
 all:
 	$(PY) scripts/run_all.py

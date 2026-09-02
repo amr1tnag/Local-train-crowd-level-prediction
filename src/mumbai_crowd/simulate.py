@@ -209,7 +209,7 @@ class _RouteGeometry:
         # it is otherwise recomputed a million times in the inner loop.
         self.coach_bias = {
             n_cars: [np.asarray(coach_position_bias(n_cars, f)) for f in self.fob]
-            for n_cars in (12, 15)
+            for n_cars in cfg.rake_lengths
         }
 
         W = destination_weights(route)

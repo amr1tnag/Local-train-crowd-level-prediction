@@ -54,6 +54,7 @@ from mumbai_crowd.losses import (
 from mumbai_crowd.metrics import (
     METRIC_GLOSSARY,
     band_confusion,
+    danger_reliability_table,
     leaderboard,
     regression_report,
 )
@@ -207,6 +208,23 @@ def main() -> int:
 
         dp = DistributionalPolicy(taus=np.asarray(TAUS))
         policy_rows["quantile ensemble + Bayes action"] = policy_report(y_test, dp.decide(q_test))
+
+        # The Bayes rule is optimal only if its probabilities are conditionally
+        # calibrated, so check that rather than assuming it.
+        probs = dp.band_probabilities(q_test)
+        p_danger = probs[:, 3]
+        observed = float((y_test >= 12.0).mean())
+        print(f"\n  mean predicted P(DANGEROUS) = {p_danger.mean():.4f}  "
+              f"vs observed base rate {observed:.4f}")
+        print(f"  rows with P(DANGEROUS) > 0.25: {(p_danger > 0.25).sum():,} "
+              f"of {len(p_danger):,}  ({(p_danger > 0.25).mean():.3%})")
+        print("  (the Bayes rule needs roughly P>0.25 before a relief rake beats marshalling,")
+        print("   so if the tail probability is under-stated the optimal policy simply never fires)")
+        reliability = danger_reliability_table(p_danger, y_test)
+        print()
+        print(reliability.round(4).to_string(index=False))
+        reliability.to_csv(tabdir / "co2_danger_reliability.csv", index=False)
+        plots.fig_danger_reliability(reliability, figdir)
 
         coverage = pd.DataFrame(
             {
