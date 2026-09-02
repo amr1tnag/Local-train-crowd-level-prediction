@@ -7,6 +7,7 @@ import pytest
 from mumbai_crowd.config import COST_MATRIX, density_to_band
 from mumbai_crowd.metrics import (
     asymmetric_cost,
+    danger_reliability_table,
     band_confusion,
     bias,
     critical_miss_rate,
@@ -117,3 +118,46 @@ def test_report_and_leaderboard_round_trip():
     })
     assert board.index[0] == "good"
     assert board.loc["good", "exp_cost_inr"] < board.loc["bad", "exp_cost_inr"]
+
+
+# --- reliability diagnostic ----------------------------------------------
+
+def test_reliability_table_recovers_a_known_relationship():
+    """A perfectly calibrated score must land on the diagonal."""
+    rng = np.random.default_rng(9)
+    n = 60000
+    p = rng.uniform(0.0, 0.9, n)
+    dangerous = rng.random(n) < p
+    # 13 is inside DANGEROUS, 1 is inside COMFORTABLE.
+    y = np.where(dangerous, 13.0, 1.0)
+    t = danger_reliability_table(p, y)
+    assert len(t) > 4
+    assert np.abs(t["predicted"] - t["observed"]).max() < 0.03
+
+
+def test_reliability_table_detects_over_confidence():
+    rng = np.random.default_rng(10)
+    n = 40000
+    p = rng.uniform(0.0, 0.9, n)
+    dangerous = rng.random(n) < p / 2.0        # truth is half what is claimed
+    y = np.where(dangerous, 13.0, 1.0)
+    t = danger_reliability_table(p, y)
+    assert (t["observed"] < t["predicted"]).all()
+
+
+def test_reliability_table_drops_thin_bins():
+    rng = np.random.default_rng(11)
+    p = np.concatenate([rng.uniform(0, 0.01, 5000), np.array([0.9] * 3)])
+    y = np.concatenate([np.ones(5000), np.full(3, 13.0)])
+    t = danger_reliability_table(p, y, min_count=30)
+    assert (t["n"] >= 30).all()
+    assert t["bin_low"].max() < 0.75
+
+
+def test_reliability_table_columns_and_ordering():
+    rng = np.random.default_rng(12)
+    p = rng.uniform(0, 1, 20000)
+    y = np.where(rng.random(20000) < p, 13.0, 1.0)
+    t = danger_reliability_table(p, y)
+    assert list(t.columns) == ["bin_low", "bin_high", "predicted", "observed", "n"]
+    assert t["bin_low"].is_monotonic_increasing

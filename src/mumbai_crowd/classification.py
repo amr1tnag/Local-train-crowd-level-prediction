@@ -5,34 +5,51 @@ Why this module exists
 The regression side of the project (CO2) produces a point forecast, and
 :class:`mumbai_crowd.decision.DistributionalPolicy` turns a *quantile ensemble*
 into band probabilities so that the Bayes-optimal action can be taken.  On this
-problem that route measurably fails, and the reliability diagram in the report
-says exactly why: the quantile ensemble is well calibrated *marginally* -- its
-empirical coverage tracks nominal tau to within 0.03 -- but it under-states
-``P(DANGEROUS | x)`` by up to 2.6x in the range where the decision actually
-turns, because a nine-point quantile grid cannot resolve a 1.1% conditional
-tail.  The Bayes rule then declines to act, and a crudely tuned threshold on a
+problem that route measurably fails.  It is well calibrated *marginally* -- its
+empirical coverage tracks nominal tau to within 0.03 -- but it has almost no
+**resolution** in the tail: 94% of coach-arrivals land in two bins near the
+base rate, and a nine-point quantile grid cannot spread a 1.1% event apart.
+The Bayes rule then has nothing to act on, and a crudely tuned threshold on a
 point forecast beats the theoretically optimal policy.
 
 The fix implied by that diagnosis is not more quantiles.  It is to model the
-thing the decision needs -- the band probabilities -- *directly*, and then to
-recalibrate them before handing them to the cost matrix.  That is what this
-module does, and whether it actually closes the gap is an empirical question
-the pipeline answers rather than an assumption.
+thing the decision needs -- the band probabilities -- *directly*.  A multiclass
+model over the four bands does exactly that, and on this problem it produces
+the cheapest policy in the project.
 
-Design notes
-------------
-**Class weighting and calibration are deliberately separated.**  Up-weighting
-the 1.1% DANGEROUS class helps a boosted ensemble spend capacity on the tail,
-but it also destroys calibration by construction: the model is now fitting a
-re-weighted distribution, not the real one.  Under a cost matrix that is fine
-*provided* you put the calibration back, so the two steps are separate objects
-here and the pipeline reports both with and without.
+What the experiment actually showed
+-----------------------------------
+The obvious next move after "train a classifier for a rare class" is to
+up-weight the class and then recalibrate, so this module implements both
+levers as separate objects and the pipeline crosses them.  The result is worth
+stating here, because it is the opposite of the folklore:
 
-**The calibration set is not the early-stopping set.**  Fitting isotonic
-regression on the same rows that chose the iteration count would calibrate
-against a slice the model has already been tuned on.  The validation window is
-therefore split in half *by date*, the earlier half choosing the number of
-trees and the later half fitting the calibrator.
+* For a model whose probabilities were **broken on purpose** by class
+  weighting, recalibration helps a great deal, and the more flexible the
+  calibrator the better.
+* For a model trained on plain multiclass log-loss -- a proper scoring rule,
+  no reweighting -- recalibration **hurts**, monotonically in the calibrator's
+  flexibility.
+
+The cause is measurable.  Post-hoc calibration is a *repair* fitted on one
+window, and this dataset's DANGEROUS base rate falls from 1.6% in training and
+calibration (monsoon) to 1.1% in test (post-monsoon).  Isotonic faithfully
+learns "push the probabilities up" from the wetter window and applies it to a
+drier one, where it is exactly backwards.
+:class:`TemperatureCalibrator`, with a single degree of freedom, has far less
+to transfer wrongly, which is why both are implemented and compared rather
+than one being assumed correct.
+
+The practical conclusion: train on a proper scoring rule, do not break the
+probability scale, and there is nothing left to repair.
+
+Design note
+-----------
+**The calibration set is not the early-stopping set.**  Fitting a calibrator on
+the same rows that chose the iteration count would calibrate against a slice
+the model has already been tuned on.  The validation window is therefore split
+in half *by date* (:func:`split_validation_by_date`), the earlier half choosing
+the number of trees and the later half fitting the calibrator.
 """
 
 from __future__ import annotations

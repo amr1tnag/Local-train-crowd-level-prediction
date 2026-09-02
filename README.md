@@ -88,7 +88,7 @@ Or step by step:
 python scripts/01_generate_data.py --days 180 --monitored 0.08   # simulate
 python scripts/02_train_regression.py                            # CO2
 python scripts/03_cluster_stations.py --k 5                      # CO5
-python -m pytest                                                 # 155 tests, ~3 min
+python -m pytest                                                 # 159 tests, ~3 min
 ```
 
 Figures land in `reports/figures/`, tables in `reports/tables/`.
@@ -516,9 +516,13 @@ base rate:
 | quantile ensemble | 492 | 0.381 |
 | band classifier | 803 | 0.785 |
 
-The Bayes rule needs both properties, and the quantile route was short of the
-second one. A model can be beautifully calibrated and useless if it never says
-anything is likely.
+The Bayes rule needs both properties, and §6.4 showed the quantile ensemble
+missing on both counts — it under-states the tail *and* it huddles 94% of
+arrivals into two bins near the base rate. The classifier fixes only the
+second. That is apparently enough, which is the useful lesson: a model can be
+beautifully calibrated and useless if it never says anything is likely, and
+between two imperfect models the one that separates the population is the one
+a cost-sensitive decision rule can actually use.
 
 #### Recalibration helps a broken model and hurts a sound one
 
@@ -548,8 +552,8 @@ dataset that a real deployment would share:
 On the calibration window the raw model *under*-states danger, so isotonic
 learns to push probabilities up — mapping a raw 0.10 to 0.22 and a raw 0.40 to
 0.55. On the test window, with 26% less danger about, that correction is
-exactly backwards, and the calibrated model ends up predicting 0.61 where the
-truth is 0.24. The calibrator faithfully transferred a base rate that had
+exactly backwards, and the calibrated model ends up predicting 0.63 where the
+truth is 0.26. The calibrator faithfully transferred a base rate that had
 expired. Temperature scaling, with one degree of freedom, has less to transfer
 wrongly and lands in between — which is the point of running both.
 
@@ -557,6 +561,15 @@ wrongly and lands in between — which is the point of running both.
 on a proper scoring rule, do not break the probability scale with class
 weights, and then you have nothing to repair. Post-hoc calibration is a
 *repair*, and repairs fitted on one regime do not survive a change of regime.
+
+*A partial check on that explanation.* The `--quick` pipeline runs 60 days
+instead of 180, which keeps the whole window inside the monsoon and shrinks the
+base-rate shift from 26% to 17% (1.72% → 1.43%). If the shift is what breaks
+the calibrator, its damage should shrink with it — and it does: on that run the
+three calibrators are within ₹2 of each other (₹120.1 / ₹118.0 / ₹118.0)
+instead of spanning ₹10. This is corroboration rather than proof, since the
+short run also changes the training-set size and the test window; a clean test
+would hold everything else fixed and vary only the shift.
 
 #### The row an operator might actually want
 
@@ -676,14 +689,10 @@ There is no ground truth, so three independent checks are used instead:
    stations belong to no cluster at all", and on a network with genuine
    oddities that answer deserves a hearing.
 
-Cluster names are generated **from the centroids by rule**, not written by
-hand, so re-running with a different k or seed cannot leave the labels lying
-about what the clusters contain.
-
 ### 7.5 CO5 results
 
-Five criteria were computed over k = 2…10 and they pick five different
-answers. That is reported rather than smoothed over:
+Six criteria were computed over k = 2…10 and they pick four different answers
+between them. That is reported rather than smoothed over:
 
 | criterion | would pick |
 |---|---|
@@ -731,9 +740,18 @@ what "people pass through here" looks like in a curve.
 
 Nothing about the geography, the station names or the branch structure was
 given to the algorithm — only 40 normalised hourly flow shares and 13 summary
-statistics. It recovered the dock belt, the CBD, the interchange spine and the
-Navi Mumbai dormitory belt anyway, and `reports/figures/24_line_map.png` shows
-those roles laid out along the line.
+statistics. It nonetheless separated CSMT and Masjid as a two-station
+employment sink, pulled the interchange spine (Kurla, Vadala Road, Bandra,
+Andheri, Nerul, Mahim Jn) into one group, and put the dormitory ends of *both*
+branches together — Panvel, Kharghar, Khandeshwar and Manasarovar alongside
+Jogeshwari, Ram Mandir and Goregaon, which are forty kilometres apart on
+different branches and behave identically. `reports/figures/24_line_map.png`
+lays the roles out along the line, and the fourth cluster is the one worth
+arguing about: the old dock belt (Dockyard Road, Reay Road, Cotton Green,
+Sewri) sorts with Sandhurst Road, Vashi and Belapur CBD. Nobody would draw
+that grouping by hand, and it is defensible once you see the curves — all
+seven are mild *evening* sources (PM net source +0.21) with no strong morning
+signature, which is what a workplace catchment with little housing looks like.
 
 **External validation.** Three algorithms were run independently on the same
 profiles:
@@ -844,7 +862,7 @@ scripts/
   03_cluster_stations.py  CO5 end to end + the CO5→CO2 bridge
   run_all.py              all three, with a --quick mode
 
-tests/                    155 tests: loss gradients, simulator physics
+tests/                    159 tests: loss gradients, simulator physics
                           (conservation, capacity, tidal direction), leakage
                           guards, decision policies and the Bayes rule,
                           calibrators, clustering, estimators.
