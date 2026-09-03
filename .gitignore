@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+
+# Large regenerable data caches (weather cache etc.) — not the processed dataset,
+# which is small enough (~2MB parquet) to commit directly.
+data/raw/*
+!data/raw/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
